@@ -1,58 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-cutlass_scaled_mm_ue8m0_fallback_v3.py
-========================================
-
-v2 失败原因复盘:
-    v2 用 `torch.ops._C.cutlass_scaled_mm = _patched_xxx` 直接给
-    OpOverloadPacket 赋值, 把它替换成了普通 Python function.
-    后续 torch._export.utils._collect_all_valid_cia_ops_for_namespace
-    遍历 torch.ops._C 时调 `.overloads()` 失败, 把 CustomDecompTable
-    搞成半初始化坏态, 导致 torch._inductor.decomposition import 时
-    `{**core_aten_decompositions()}` 抛 TypeError:
-        'CustomDecompTable' object is not a mapping.
-
-    Traceback 在 v2 表面上指向"补丁污染 inductor", 实际根因是
-    "破坏了 torch.ops._C 的 OpPacket 遍历".
-
-v3 策略:
-    完全不触碰 torch.ops._C 名字空间, 改成:
-    1) 在 _custom_ops.py 末尾追加一个 helper `_ue8m0_safe_cutlass_scaled_mm`
-    2) 用 sed-like 文本替换, 把文件里所有
-           torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, ...)
-       的直接调用改成
-           _ue8m0_safe_cutlass_scaled_mm(out, a, b, scale_a, scale_b, ...)
-    3) helper 内部把 UE8M0 dtype 的 scale 张量 .to(torch.float32) 再
-       转发到 torch.ops._C.cutlass_scaled_mm (一次性调用, 不污染名字空间)
-
-完整 vLLM 启动命令:
-----------------------------------------------------------------------
-export VLLM_HC_FALLBACK=1
-export VLLM_INDEXER_FALLBACK=1
-export VLLM_UE8M0_FALLBACK=1
-export VLLM_USE_DEEP_GEMM=0
-export VLLM_FUSED_MOE_BACKEND=triton
-
-vllm serve /workspace/models/DeepSeek-V4-Flash \
-  --served-model-name deepseek-v4-flash --trust-remote-code \
-  --kv-cache-dtype fp8 --block-size 256 --enable-expert-parallel \
-  --tensor-parallel-size 4 --max-model-len 32768 \
-  --tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4 \
-  --enable-auto-tool-choice --reasoning-parser deepseek_v4 \
-  --port 8081 --enable-prompt-tokens-details --enforce-eager
-----------------------------------------------------------------------
-
-用法:
-    sudo python3 cutlass_scaled_mm_ue8m0_fallback_v3.py --apply
-    sudo python3 cutlass_scaled_mm_ue8m0_fallback_v3.py --revert
-    python3      cutlass_scaled_mm_ue8m0_fallback_v3.py --check
-
-注意:
-    必须先把 v2 (如果还在) 完全 revert 干净再 apply v3, 不然两个补丁
-    会同时存在. v3 的 --apply 会先检测 v2 残留, 自动清理.
-"""
-
 import argparse
 import os
 import re
